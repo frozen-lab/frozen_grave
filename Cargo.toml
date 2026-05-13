@@ -1,12 +1,20 @@
 [package]
-name = "grave"
+name = "frozen_grave"
 version = "0.0.1"
 edition = "2024"
 description = "A page based storage engine w/ fire-and-forget writes and crash-safe durability semantics"
-license = "Apache-2.0"
-repository = "https://github.com/frozen-lab/grave"
-keywords = ["database", "persistence", "async-io", "storage"]
-categories = ["Caching"]
+keywords = [
+    "rta",
+    "database",
+    "persistence",
+    "storage",
+]
+categories = [
+    "caching",
+    "database-implementations",
+]
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/frozen-lab/frozen_grave"
 exclude = ["shell.nix"]
 
 [target.'cfg(unix)'.dependencies]
