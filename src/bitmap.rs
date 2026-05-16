@@ -128,6 +128,7 @@ impl Header {
 enum ISA {
     SSE2,
     AVX2,
+    NEON,
 }
 
 struct SIMD(ISA);
@@ -143,17 +144,25 @@ impl SIMD {
             return Self(ISA::SSE2);
         }
 
-        // impl for aarch64
-        unimplemented!()
+        #[cfg(target_arch = "aarch64")]
+        return Self(ISA::NEON);
     }
 
     unsafe fn is_full(&self, slot: &SLOT) -> bool {
-        match self.0 {
-            ISA::SSE2 => self._is_full_sse2(slot),
-            ISA::AVX2 => self._is_full_avx2(slot),
+        #[cfg(target_arch = "x86_64")]
+        {
+            return match self.0 {
+                ISA::SSE2 => self._is_full_sse2(slot),
+                ISA::AVX2 => self._is_full_avx2(slot),
+                _ => unreachable!(),
+            };
         }
+
+        #[cfg(target_arch = "aarch64")]
+        return self._is_full_neon(slot);
     }
 
+    #[cfg(target_arch = "x86_64")]
     #[target_feature(enable = "sse2")]
     unsafe fn _is_full_sse2(&self, slot: &SLOT) -> bool {
         use std::arch::x86_64::*;
@@ -170,13 +179,10 @@ impl SIMD {
         let lo_full = _mm_movemask_epi8(cmp_lo) == 0xFFFF;
         let hi_full = _mm_movemask_epi8(cmp_hi) == 0xFFFF;
 
-        if lo_full && hi_full {
-            return true;
-        }
-
-        false
+        lo_full && hi_full
     }
 
+    #[cfg(target_arch = "x86_64")]
     #[target_feature(enable = "avx2")]
     unsafe fn _is_full_avx2(&self, slot: &SLOT) -> bool {
         use std::arch::x86_64::*;
@@ -185,10 +191,26 @@ impl SIMD {
         let ymm = unsafe { _mm256_loadu_si256(slot.as_ptr() as *const __m256i) };
 
         let cmp = _mm256_cmpeq_epi32(ymm, full);
-        if _mm256_movemask_epi8(cmp) == -1 {
-            return true;
-        }
+        _mm256_movemask_epi8(cmp) == -1
+    }
 
-        false
+    #[cfg(target_arch = "aarch64")]
+    #[target_feature(enable = "neon")]
+    unsafe fn _is_full_neon(&self, slot: &SLOT) -> bool {
+        use std::arch::aarch64::*;
+
+        let ptr = slot.as_ptr();
+        let full = vdupq_n_u32(WORD::MAX);
+
+        let lo = unsafe { vld1q_u32(ptr) };
+        let hi = unsafe { vld1q_u32(ptr.add(4)) };
+
+        let cmp_lo = vceqq_u32(lo, full);
+        let cmp_hi = vceqq_u32(hi, full);
+
+        let lo_full = unsafe { vminvq_u32(cmp_lo) } == WORD::MAX;
+        let hi_full = unsafe { vminvq_u32(cmp_hi) } == WORD::MAX;
+
+        lo_full && hi_full
     }
 }
