@@ -45,9 +45,9 @@ impl BitMap {
                 mmap.write_sync(Header::HEADER_SLOT_INDEX, |hdr| {
                     let header = Header::from_slot_mut(&mut *hdr);
 
-                    header.total_slots = initial_cap as u64;
-                    header.available_bits = (initial_cap * 8) as u64;
                     header.slot_pointer = 0;
+                    header.total_slots = initial_cap as u64;
+                    header.available_bits = (initial_cap as usize * BITS_PER_SLOT) as u64;
                 })
             }?;
         } else {
@@ -57,11 +57,9 @@ impl BitMap {
             }
         }
 
-        let pool = Pool::new(initial_cap);
-
         Ok(Some(Self {
-            pool,
             mmap,
+            pool: Pool::new(initial_cap),
             simd: SIMD::new(),
         }))
     }
@@ -86,19 +84,17 @@ impl BitMap {
     unsafe fn allocate_2(&self, header: &Header) -> FrozenRes<Option<(usize, u64)>> {
         let total = header.total_slots as usize;
         for _ in 0..total {
-            let slot_idx = match self.pool.next() {
+            let mut slot_guard = match self.pool.next() {
                 Some(idx) => idx,
                 None => return Ok(None),
             };
 
-            // NOTE: we must +1 as 0th slot is reserved for the header
-            let mmap_slot = slot_idx + 1;
-
-            let slot = unsafe { self.mmap.read(mmap_slot, |s| *s) }?;
-            let slot_base = slot_idx * BITS_PER_SLOT;
+            let slot_base = slot_guard.mmap_idx * BITS_PER_SLOT;
+            let slot = unsafe { self.mmap.read(slot_guard.mmap_idx, |s| *s) }?;
 
             if unsafe { self.simd.is_full(&slot) } {
-                self.pool.retire(slot_idx);
+                slot_guard.full = true;
+                drop(slot_guard);
                 continue;
             }
 
@@ -124,9 +120,9 @@ impl BitMap {
                         let hdr = Header::from_slot_mut(&mut *slot);
 
                         hdr.available_bits -= 2;
-                        hdr.slot_pointer = slot_idx as u64;
+                        hdr.slot_pointer = slot_guard.idx as u64;
                     })?;
-                    tx.write(mmap_slot, |slot| {
+                    tx.write(slot_guard.idx, |slot| {
                         let slot = &mut *slot;
 
                         // validation under lock
@@ -135,9 +131,8 @@ impl BitMap {
                         }
                     })?;
                 }
-                let epoch = tx.commit()?;
 
-                return Ok(Some((abs, epoch)));
+                return Ok(Some((abs, tx.commit()?)));
             }
         }
 
@@ -287,7 +282,7 @@ impl Pool {
     }
 
     #[inline(always)]
-    fn next(&self) -> Option<usize> {
+    fn next(&self) -> Option<SlotGuard<'_>> {
         let mask = self.total - 1;
 
         for _ in 0..self.total {
@@ -304,7 +299,7 @@ impl Pool {
                 )
                 .is_ok()
             {
-                return Some(idx);
+                return Some(SlotGuard::new(self, idx));
             }
         }
 
@@ -319,5 +314,32 @@ impl Pool {
     #[inline(always)]
     fn retire(&self, idx: usize) {
         self.slots[idx].store(Self::FULL, atomic::Ordering::Release);
+    }
+}
+
+struct SlotGuard<'a> {
+    pool_idx: usize,
+    mmap_idx: usize,
+    full: bool,
+    pool: &'a Pool,
+}
+
+impl<'a> SlotGuard<'a> {
+    fn new(pool: &'a Pool, idx: usize) -> Self {
+        Self {
+            pool,
+            full: false,
+            pool_idx: idx,
+            mmap_idx: idx + 1, // NOTE: we must +1 as 0th slot is reserved for the header
+        }
+    }
+}
+
+impl Drop for SlotGuard<'_> {
+    fn drop(&mut self) {
+        match self.full {
+            true => self.pool.retire(self.pool_idx),
+            false => self.pool.release(self.pool_idx),
+        }
     }
 }
