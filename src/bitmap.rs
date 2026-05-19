@@ -50,9 +50,6 @@ enum ISA {
 
     #[cfg(target_arch = "aarch64")]
     NEON,
-
-    #[cfg(target_arch = "aarch64")]
-    SVE,
 }
 
 struct SIMD {
@@ -71,13 +68,7 @@ impl SIMD {
         }
 
         #[cfg(target_arch = "aarch64")]
-        {
-            if std::arch::is_aarch64_feature_detected!("sve") {
-                return Self { isa: ISA::SVE };
-            }
-
-            return Self { isa: ISA::NEON };
-        }
+        return Self { isa: ISA::NEON };
     }
 
     #[inline(always)]
@@ -91,9 +82,6 @@ impl SIMD {
 
             #[cfg(target_arch = "aarch64")]
             ISA::NEON => unsafe { Self::is_slot_full_neon(slot) },
-
-            #[cfg(target_arch = "aarch64")]
-            ISA::SVE => unsafe { Self::is_slot_full_sve(slot) },
         }
     }
 
@@ -128,50 +116,18 @@ impl SIMD {
     #[cfg(target_arch = "aarch64")]
     #[target_feature(enable = "neon")]
     unsafe fn is_slot_full_neon(slot: &Slot) -> bool {
-        let full = vdupq_n_u64(FULL_WORD);
         let ptr = slot.as_ptr();
-
         let lo = vld1q_u64(ptr);
         let hi = vld1q_u64(ptr.add(2));
 
-        let cmp_lo = vceqq_u64(lo, full);
-        let cmp_hi = vceqq_u64(hi, full);
-
-        let lo_full = vminvq_u64(cmp_lo) == FULL_WORD;
-        let hi_full = vminvq_u64(cmp_hi) == FULL_WORD;
-
-        lo_full && hi_full
-    }
-
-    #[cfg(all(target_arch = "aarch64"))]
-    #[target_feature(enable = "sve")]
-    unsafe fn is_slot_full_sve(slot: &Slot) -> bool {
-        let pg = svwhilelt_b64(0, 4);
-        let vec = svld1_u64(pg, slot.as_ptr());
-        let cmp = svcmpeq_n_u64(pg, vec, FULL_WORD);
-
-        svptest_all(pg, cmp)
+        let anded = vandq_u64(lo, hi);
+        vgetq_lane_u64(anded, 0) == FULL_WORD && vgetq_lane_u64(anded, 1) == FULL_WORD
     }
 }
 
 #[cfg(test)]
 mod simd_tests {
     use super::*;
-
-    #[test]
-    fn ok_runtime_dispatch() {
-        let simd = SIMD::new();
-
-        #[cfg(target_arch = "x86_64")]
-        match simd.isa {
-            ISA::SSE2 | ISA::AVX2 => {}
-        }
-
-        #[cfg(target_arch = "aarch64")]
-        match simd.isa {
-            ISA::NEON | ISA::SVE => {}
-        }
-    }
 
     #[inline(always)]
     fn is_slot_full(slot: &Slot) -> bool {
@@ -228,18 +184,6 @@ mod simd_tests {
     fn ok_neon_isa() {
         unsafe {
             validate_impl(|slot| SIMD::is_slot_full_neon(slot));
-        }
-    }
-
-    #[cfg(target_arch = "aarch64")]
-    #[test]
-    fn ok_sve_isa() {
-        if !std::arch::is_aarch64_feature_detected!("sve") {
-            return;
-        }
-
-        unsafe {
-            validate_impl(|slot| SIMD::is_slot_full_sve(slot));
         }
     }
 
