@@ -50,6 +50,9 @@ enum ISA {
 
     #[cfg(target_arch = "aarch64")]
     NEON,
+
+    #[cfg(target_arch = "aarch64")]
+    SVE,
 }
 
 struct SIMD {
@@ -68,7 +71,13 @@ impl SIMD {
         }
 
         #[cfg(target_arch = "aarch64")]
-        return Self { isa: ISA::NEON };
+        {
+            if std::arch::is_aarch64_feature_detected!("sve") {
+                return Self { isa: ISA::SVE };
+            }
+
+            return Self { isa: ISA::NEON };
+        }
     }
 
     #[inline(always)]
@@ -82,6 +91,9 @@ impl SIMD {
 
             #[cfg(target_arch = "aarch64")]
             ISA::NEON => unsafe { Self::is_slot_full_neon(slot) },
+
+            #[cfg(target_arch = "aarch64")]
+            ISA::SVE => unsafe { Self::is_slot_full_sve(slot) },
         }
     }
 
@@ -129,5 +141,15 @@ impl SIMD {
         let hi_full = vminvq_u64(cmp_hi) == FULL_WORD;
 
         lo_full && hi_full
+    }
+
+    #[cfg(all(target_arch = "aarch64"))]
+    #[target_feature(enable = "sve")]
+    unsafe fn is_slot_full_sve(slot: &Slot) -> bool {
+        let pg = svptrue_b64();
+        let vec = svld1_u64(pg, slot.as_ptr());
+        let cmp = svcmpeq_n_u64(pg, vec, FULL_WORD);
+
+        svptest_all(pg, cmp)
     }
 }
